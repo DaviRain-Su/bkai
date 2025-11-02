@@ -1,9 +1,9 @@
 use crate::state::ReaderState;
 use anyhow::Result;
 use gpui::{
-    App, Application, Bounds, Context as GpuiContext, FontWeight, KeyBinding, Render, SharedString,
-    StatefulInteractiveElement, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
-    prelude::*, px, relative, rgb, size,
+    App, Application, Bounds, Context as GpuiContext, FontWeight, KeyBinding, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, relative, rgb, size,
 };
 use std::rc::Rc;
 
@@ -18,11 +18,15 @@ pub struct GpuiRuntime;
 
 struct ReaderView {
     state: ReaderState,
+    chapter_scroll: ScrollHandle,
 }
 
 impl ReaderView {
     fn new(state: ReaderState) -> Self {
-        Self { state }
+        Self {
+            state,
+            chapter_scroll: ScrollHandle::new(),
+        }
     }
 
     fn nav_button(
@@ -72,11 +76,13 @@ impl ReaderView {
             .items_center()
             .child(Self::nav_button(cx, "Previous", has_prev, |this, cx| {
                 if this.state.previous_chapter() {
+                    this.chapter_scroll.scroll_to_top_of_item(0);
                     cx.notify();
                 }
             }))
             .child(Self::nav_button(cx, "Next", has_next, |this, cx| {
                 if this.state.next_chapter() {
+                    this.chapter_scroll.scroll_to_top_of_item(0);
                     cx.notify();
                 }
             }))
@@ -96,6 +102,7 @@ impl ReaderView {
         cx: &mut GpuiContext<Self>,
     ) {
         if self.state.previous_chapter() {
+            self.chapter_scroll.scroll_to_top_of_item(0);
             cx.notify();
         }
     }
@@ -107,6 +114,7 @@ impl ReaderView {
         cx: &mut GpuiContext<Self>,
     ) {
         if self.state.next_chapter() {
+            self.chapter_scroll.scroll_to_top_of_item(0);
             cx.notify();
         }
     }
@@ -204,15 +212,23 @@ impl Render for ReaderView {
                         } else {
                             div().flex().flex_col().gap_3().children(paragraphs)
                         };
+                        let scroll_id = SharedString::from(format!("chapter-scroll-{index}"));
+
                         div()
+                            .id(scroll_id)
                             .flex()
                             .flex_col()
                             .flex_grow()
-                            .min_h(px(0.))
+                            .flex_shrink()
+                            .flex_basis(px(0.0))
                             .gap_3()
                             .p_4()
                             .rounded_md()
                             .bg(rgb(0x1f2937))
+                            .block_mouse_except_scroll()
+                            .track_scroll(&self.chapter_scroll)
+                            .scrollbar_width(px(12.0))
+                            .overflow_scroll()
                             .child(
                                 div()
                                     .text_lg()
@@ -222,6 +238,7 @@ impl Render for ReaderView {
                             .child(content)
                     }
                     None => div()
+                        .id("chapter-scroll-empty")
                         .flex()
                         .flex_col()
                         .gap_2()
