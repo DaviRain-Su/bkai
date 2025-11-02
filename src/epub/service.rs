@@ -4,7 +4,8 @@ use super::{
 };
 use anyhow::Result;
 use epub::doc::{DocError, EpubDoc, NavPoint, SpineItem};
-use html2text::from_read;
+use html2text::render::text_renderer::{RichAnnotation, TaggedLine};
+use html2text::{from_read, parse};
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
@@ -281,103 +282,80 @@ impl EpubService {
     }
 
     fn html_to_blocks(html: &str) -> Vec<ChapterBlock> {
+        let render_tree = parse(Cursor::new(html.as_bytes()));
+        let lines = render_tree.render_rich(4096).into_lines();
+        Self::blocks_from_tagged_lines(lines)
+    }
+
+    fn blocks_from_tagged_lines(lines: Vec<TaggedLine<Vec<RichAnnotation>>>) -> Vec<ChapterBlock> {
         let mut blocks = Vec::new();
-        let mut index = 0usize;
-        while let Some(open_rel) = html[index..].find('<') {
-            let open_idx = index + open_rel;
-            let remaining = &html[open_idx + 1..];
-            let close_tag_end = match remaining.find('>') {
-                Some(end) => end,
-                None => break,
-            };
-            let tag_body = remaining[..close_tag_end].trim();
-            if tag_body.is_empty()
-                || tag_body.starts_with('!')
-                || tag_body.starts_with('?')
-                || tag_body.starts_with('/')
-            {
-                index = open_idx + close_tag_end + 1;
+        let mut paragraph_spans: Vec<TextSpan> = Vec::new();
+        let mut i = 0;
+
+        while i < lines.len() {
+            let line = &lines[i];
+            let raw_line = line.clone().into_string();
+            let trimmed = raw_line.trim();
+
+            if trimmed.is_empty() {
+                Self::flush_paragraph_spans(&mut paragraph_spans, &mut blocks);
+                i += 1;
                 continue;
             }
 
-            let mut first_token = tag_body.split_whitespace().next().unwrap_or("").trim();
-            let self_closing = first_token.ends_with('/');
-            if self_closing {
-                first_token = first_token.trim_end_matches('/');
-            }
-            let tag_name_owned = first_token.to_ascii_lowercase();
-            let tag_name = tag_name_owned.as_str();
-            let tag_end_index = open_idx + close_tag_end + 1;
-
-            if self_closing {
-                if tag_name == "br" {
-                    blocks.push(ChapterBlock::Paragraph {
-                        spans: vec![TextSpan {
-                            text: String::new(),
-                            bold: false,
-                            italic: false,
-                        }],
-                    });
-                }
-                index = tag_end_index;
+            if let Some(level) = Self::underline_heading_level(
+                lines
+                    .get(i + 1)
+                    .map(|l| l.clone().into_string())
+                    .as_ref()
+                    .map(|s| s.trim()),
+            ) {
+                Self::flush_paragraph_spans(&mut paragraph_spans, &mut blocks);
+                blocks.push(ChapterBlock::Heading {
+                    level,
+                    spans: vec![TextSpan::plain(trimmed)],
+                });
+                i += 2;
                 continue;
             }
 
-            let closing_tag = format!("</{}>", tag_name);
-            if let Some(close_rel) = html[tag_end_index..].find(&closing_tag) {
-                let content_start = tag_end_index;
-                let content_end = tag_end_index + close_rel;
-                let inner = &html[content_start..content_end];
-                let text = Self::html_fragment_to_text(inner);
-                if !text.trim().is_empty() {
-                    match tag_name {
-                        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
-                            let level = tag_name.trim_start_matches('h').parse::<u8>().unwrap_or(1);
-                            blocks.push(ChapterBlock::Heading {
-                                level,
-                                spans: vec![TextSpan {
-                                    text: text.trim().to_string(),
-                                    bold: false,
-                                    italic: false,
-                                }],
-                            });
-                        }
-                        "p" | "blockquote" => {
-                            blocks.push(ChapterBlock::Paragraph {
-                                spans: vec![TextSpan {
-                                    text: text.trim().to_string(),
-                                    bold: false,
-                                    italic: false,
-                                }],
-                            });
-                        }
-                        "li" => {
-                            blocks.push(ChapterBlock::Paragraph {
-                                spans: vec![TextSpan {
-                                    text: format!("- {}", text.trim()),
-                                    bold: false,
-                                    italic: false,
-                                }],
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-                index = content_end + closing_tag.len();
-            } else {
-                index = tag_end_index;
+            if let Some((level, text)) = Self::parse_hash_heading(trimmed) {
+                Self::flush_paragraph_spans(&mut paragraph_spans, &mut blocks);
+                blocks.push(ChapterBlock::Heading {
+                    level,
+                    spans: vec![TextSpan::plain(text)],
+                });
+                i += 1;
+                continue;
             }
+
+            if let Some((prefix, text)) = Self::parse_list_item(trimmed) {
+                Self::flush_paragraph_spans(&mut paragraph_spans, &mut blocks);
+                blocks.push(ChapterBlock::Paragraph {
+                    spans: vec![TextSpan::plain(format!("{}{}", prefix, text.trim()))],
+                });
+                i += 1;
+                continue;
+            }
+
+            let spans = Self::spans_from_line(line);
+            let needs_space = !paragraph_spans.is_empty();
+            Self::append_spans(&mut paragraph_spans, spans, needs_space);
+            i += 1;
         }
 
+        Self::flush_paragraph_spans(&mut paragraph_spans, &mut blocks);
+
         if blocks.is_empty() {
-            let fallback = Self::html_to_plain_text(html);
-            if !fallback.trim().is_empty() {
+            let fallback_lines = lines
+                .into_iter()
+                .map(|line| line.into_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let condensed = Self::normalize_whitespace(&fallback_lines);
+            if !condensed.trim().is_empty() {
                 blocks.push(ChapterBlock::Paragraph {
-                    spans: vec![TextSpan {
-                        text: fallback.trim().to_string(),
-                        bold: false,
-                        italic: false,
-                    }],
+                    spans: vec![TextSpan::plain(condensed.trim())],
                 });
             }
         }
@@ -385,9 +363,140 @@ impl EpubService {
         blocks
     }
 
-    fn html_fragment_to_text(fragment: &str) -> String {
-        let rendered = html2text::from_read(fragment.as_bytes(), usize::MAX);
-        Self::normalize_whitespace(&rendered)
+    fn flush_paragraph_spans(paragraph: &mut Vec<TextSpan>, blocks: &mut Vec<ChapterBlock>) {
+        if paragraph.is_empty() {
+            return;
+        }
+        let merged = Self::merge_spans(std::mem::take(paragraph));
+        let text = Self::spans_to_text(&merged);
+        if !text.trim().is_empty() {
+            blocks.push(ChapterBlock::Paragraph { spans: merged });
+        }
+    }
+
+    fn underline_heading_level(next_line: Option<&str>) -> Option<u8> {
+        let line = next_line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.chars().all(|c| c == '=') {
+            Some(1)
+        } else if trimmed.chars().all(|c| c == '-') {
+            Some(2)
+        } else {
+            None
+        }
+    }
+
+    fn parse_hash_heading(line: &str) -> Option<(u8, &str)> {
+        if !line.starts_with('#') {
+            return None;
+        }
+        let level = line.chars().take_while(|c| *c == '#').count().min(6) as u8;
+        let text = line[level as usize..].trim();
+        if text.is_empty() {
+            None
+        } else {
+            Some((level.max(1), text))
+        }
+    }
+
+    fn parse_list_item(line: &str) -> Option<(&'static str, String)> {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed
+            .strip_prefix("* ")
+            .or_else(|| trimmed.strip_prefix("- "))
+            .or_else(|| trimmed.strip_prefix("+ "))
+        {
+            return Some(("• ", rest.to_string()));
+        }
+
+        let mut chars = trimmed.chars().peekable();
+        let mut digits = String::new();
+        while let Some(&ch) = chars.peek() {
+            if ch.is_ascii_digit() {
+                digits.push(ch);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if !digits.is_empty() && chars.peek() == Some(&'.') {
+            chars.next();
+            let rest: String = chars.collect();
+            return Some(("• ", rest.trim_start().to_string()));
+        }
+        None
+    }
+
+    fn spans_from_line(line: &TaggedLine<Vec<RichAnnotation>>) -> Vec<TextSpan> {
+        let mut spans = Vec::new();
+        for tagged in line.tagged_strings() {
+            if tagged.s.is_empty() {
+                continue;
+            }
+            let bold = tagged
+                .tag
+                .iter()
+                .any(|ann| matches!(ann, RichAnnotation::Strong));
+            let italic = tagged
+                .tag
+                .iter()
+                .any(|ann| matches!(ann, RichAnnotation::Emphasis));
+            let mut text = tagged.s.trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            if bold || italic {
+                text = text
+                    .trim_matches(|c| c == '*' || c == '_')
+                    .trim()
+                    .to_string();
+            }
+            if text.is_empty() {
+                continue;
+            }
+            spans.push(TextSpan::styled(text, bold, italic));
+        }
+        spans
+    }
+
+    fn append_spans(target: &mut Vec<TextSpan>, spans: Vec<TextSpan>, insert_space: bool) {
+        let mut first = true;
+        for span in spans.into_iter().filter(|s| !s.text.is_empty()) {
+            if insert_space && first && !target.is_empty() {
+                if !target.last().unwrap().text.ends_with(' ') {
+                    target.last_mut().unwrap().text.push(' ');
+                }
+            }
+            Self::push_span(target, span);
+            first = false;
+        }
+    }
+
+    fn push_span(target: &mut Vec<TextSpan>, span: TextSpan) {
+        if span.text.is_empty() {
+            return;
+        }
+        if let Some(last) = target.last_mut() {
+            if last.bold == span.bold && last.italic == span.italic {
+                if !last.text.ends_with(' ') && !span.text.starts_with(' ') {
+                    last.text.push(' ');
+                }
+                last.text.push_str(&span.text);
+                return;
+            }
+        }
+        target.push(span);
+    }
+
+    fn merge_spans(spans: Vec<TextSpan>) -> Vec<TextSpan> {
+        let mut merged: Vec<TextSpan> = Vec::new();
+        for span in spans {
+            Self::push_span(&mut merged, span);
+        }
+        merged
     }
 
     fn normalize_whitespace(text: &str) -> String {
@@ -432,5 +541,142 @@ impl EpubService {
                 source: other,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spans_text(spans: &[TextSpan]) -> Vec<(String, bool, bool)> {
+        spans
+            .iter()
+            .map(|span| (span.text.clone(), span.bold, span.italic))
+            .collect()
+    }
+
+    #[test]
+    fn html_to_blocks_extracts_headings_and_paragraphs() {
+        let html = r#"
+            <h1>Title</h1>
+            <p>Hello <strong>world</strong> and <em>friends</em>.</p>
+        "#;
+
+        let blocks = EpubService::html_to_blocks(html);
+        assert_eq!(blocks.len(), 2);
+
+        match &blocks[0] {
+            ChapterBlock::Heading { level, spans } => {
+                assert_eq!(*level, 1);
+                assert_eq!(
+                    spans_text(spans),
+                    vec![("Title".to_string(), false, false)]
+                );
+            }
+            other => panic!("expected heading block, got {other:?}"),
+        }
+
+        match &blocks[1] {
+            ChapterBlock::Paragraph { spans } => {
+                assert_eq!(
+                    spans_text(spans),
+                    vec![
+                        ("Hello".to_string(), false, false),
+                        ("world".to_string(), true, false),
+                        ("and".to_string(), false, false),
+                        ("friends".to_string(), false, true),
+                        (".".to_string(), false, false)
+                    ]
+                );
+            }
+            other => panic!("expected paragraph block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blocks_to_plain_text_preserves_separation() {
+        let blocks = vec![
+            ChapterBlock::Heading {
+                level: 1,
+                spans: vec![TextSpan::plain("Title")],
+            },
+            ChapterBlock::Paragraph {
+                spans: vec![
+                    TextSpan::plain("First paragraph"),
+                    TextSpan::plain("continued"),
+                ],
+            },
+            ChapterBlock::Paragraph {
+                spans: vec![TextSpan::plain("Second paragraph")],
+            },
+        ];
+
+        let text = EpubService::blocks_to_plain_text(&blocks);
+        assert_eq!(
+            text,
+            "Title\n\nFirst paragraph continued\n\nSecond paragraph"
+        );
+    }
+
+    #[test]
+    fn derive_chapter_title_prefers_toc_labels() {
+        let mut toc_labels = HashMap::new();
+        toc_labels.insert(PathBuf::from("chapter1.xhtml"), "Chapter One".to_string());
+
+        let blocks = vec![ChapterBlock::Paragraph {
+            spans: vec![TextSpan::plain("Fallback paragraph")],
+        }];
+
+        let title = EpubService::derive_chapter_title(
+            &toc_labels,
+            Path::new("chapter1.xhtml"),
+            &blocks,
+            "",
+            "chapter-1",
+        );
+
+        assert_eq!(title.as_deref(), Some("Chapter One"));
+    }
+
+    #[test]
+    fn derive_chapter_title_falls_back_to_text_and_id() {
+        let toc_labels = HashMap::new();
+        let blocks = vec![
+            ChapterBlock::Paragraph {
+                spans: vec![TextSpan::plain("   ")],
+            },
+            ChapterBlock::Paragraph {
+                spans: vec![TextSpan::plain("Some intro text")],
+            },
+        ];
+
+        let title = EpubService::derive_chapter_title(
+            &toc_labels,
+            Path::new("content/chapter2.xhtml"),
+            &blocks,
+            "",
+            "chapter-2",
+        );
+
+        assert_eq!(title.as_deref(), Some("Some intro text"));
+
+        let empty_blocks = vec![];
+        let title_from_plain = EpubService::derive_chapter_title(
+            &toc_labels,
+            Path::new("content/chapter3.xhtml"),
+            &empty_blocks,
+            "Plain text fallback",
+            "chapter-3",
+        );
+        assert_eq!(title_from_plain.as_deref(), Some("Plain text fallback"));
+
+        let title_from_id = EpubService::derive_chapter_title(
+            &toc_labels,
+            Path::new("content/chapter4.xhtml"),
+            &empty_blocks,
+            "",
+            "chapter-4",
+        );
+        assert_eq!(title_from_id.as_deref(), Some("chapter-4"));
     }
 }

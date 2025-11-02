@@ -88,3 +88,82 @@ impl ReaderState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_book(chapter_count: usize) -> Book {
+        let mut book = Book::empty();
+        book.content.chapters = (0..chapter_count)
+            .map(|idx| Chapter {
+                id: format!("chapter-{idx}"),
+                title: Some(format!("Chapter {idx}")),
+                href: format!("chapter-{idx}.xhtml"),
+                blocks: Vec::new(),
+                plain_text: format!("Chapter {idx} content"),
+            })
+            .collect();
+        book
+    }
+
+    #[test]
+    fn sets_initial_chapter_when_book_has_content() {
+        let book = sample_book(3);
+        let mut state = ReaderState::default();
+        state.set_active_book(book.clone());
+
+        assert_eq!(state.current_chapter, Some(0));
+        assert_eq!(
+            state.current_chapter().map(|(chapter, _)| chapter.id.clone()),
+            book.content.chapters.first().map(|c| c.id.clone())
+        );
+    }
+
+    #[test]
+    fn next_and_previous_chapter_navigation() {
+        let book = sample_book(2);
+        let mut state = ReaderState::default();
+        state.set_active_book(book);
+
+        assert!(state.next_chapter());
+        assert_eq!(state.current_chapter, Some(1));
+
+        // Cannot advance past the final chapter.
+        assert!(!state.next_chapter());
+        assert_eq!(state.current_chapter, Some(1));
+
+        assert!(state.previous_chapter());
+        assert_eq!(state.current_chapter, Some(0));
+
+        // Cannot move before the first chapter.
+        assert!(!state.previous_chapter());
+        assert_eq!(state.current_chapter, Some(0));
+    }
+
+    #[test]
+    fn jump_to_chapter_by_href() {
+        let book = sample_book(3);
+        let mut state = ReaderState::default();
+        state.set_active_book(book);
+
+        assert!(state.jump_to_chapter_href("chapter-2.xhtml"));
+        assert_eq!(state.current_chapter, Some(2));
+
+        // Href not found should leave the selection unchanged.
+        assert!(!state.jump_to_chapter_href("missing.xhtml"));
+        assert_eq!(state.current_chapter, Some(2));
+    }
+
+    #[test]
+    fn handles_books_without_chapters() {
+        let mut state = ReaderState::default();
+        state.set_active_book(Book::empty());
+
+        assert_eq!(state.current_chapter, None);
+        assert_eq!(state.chapter_count(), 0);
+        assert!(state.current_chapter().is_none());
+        assert!(!state.next_chapter());
+        assert!(!state.previous_chapter());
+    }
+}

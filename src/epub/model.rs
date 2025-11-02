@@ -40,6 +40,24 @@ pub struct TextSpan {
     pub italic: bool,
 }
 
+impl TextSpan {
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            bold: false,
+            italic: false,
+        }
+    }
+
+    pub fn styled(text: impl Into<String>, bold: bool, italic: bool) -> Self {
+        Self {
+            text: text.into(),
+            bold,
+            italic,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChapterBlock {
     Heading { level: u8, spans: Vec<TextSpan> },
