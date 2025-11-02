@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./index.css";
 import { createPaginationSession, PageView, PaginationSession } from "@render-engine";
-import { InMemoryStateStore } from "@state-store";
+import { createBrowserStateStore, InMemoryStateStore } from "@state-store";
 
 interface TocItem {
   id: string;
@@ -160,7 +160,7 @@ export function App() {
   const loadedProgressRef = useRef<Set<string>>(new Set());
 
   if (!storeRef.current) {
-    storeRef.current = new InMemoryStateStore();
+    storeRef.current = createBrowserStateStore();
   }
   const store = storeRef.current;
 
