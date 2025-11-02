@@ -1,10 +1,13 @@
 use crate::state::ReaderState;
 use anyhow::Result;
 use gpui::{
-    App, Application, Bounds, Context as GpuiContext, FontWeight, Render, SharedString,
-    StatefulInteractiveElement, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
+    App, Application, Bounds, Context as GpuiContext, FontWeight, KeyBinding, Render, SharedString,
+    StatefulInteractiveElement, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
     prelude::*, px, relative, rgb, size,
 };
+use std::rc::Rc;
+
+actions!([PrevChapterAction, NextChapterAction]);
 
 pub trait UiRuntime {
     fn run(self, initial_state: ReaderState) -> Result<()>;
@@ -78,6 +81,34 @@ impl ReaderView {
                 }
             }))
             .child(div().text_sm().text_color(rgb(0x9ca3af)).child(position))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x6b7280))
+                    .child("Shortcuts: ← / →"),
+            )
+    }
+
+    fn handle_prev_action(
+        &mut self,
+        _: &PrevChapterAction,
+        _window: &mut Window,
+        cx: &mut GpuiContext<Self>,
+    ) {
+        if self.state.previous_chapter() {
+            cx.notify();
+        }
+    }
+
+    fn handle_next_action(
+        &mut self,
+        _: &NextChapterAction,
+        _window: &mut Window,
+        cx: &mut GpuiContext<Self>,
+    ) {
+        if self.state.next_chapter() {
+            cx.notify();
+        }
     }
 }
 
@@ -145,6 +176,34 @@ impl Render for ReaderView {
                             .title
                             .clone()
                             .unwrap_or_else(|| format!("Chapter {}", index + 1));
+                        let paragraphs: Vec<_> = chapter
+                            .content
+                            .split("\n\n")
+                            .map(|block| block.trim())
+                            .filter(|block| !block.is_empty())
+                            .map(|block| {
+                                let normalized = block
+                                    .lines()
+                                    .map(str::trim)
+                                    .filter(|line| !line.is_empty())
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                div()
+                                    .text_sm()
+                                    .line_height(relative(1.6))
+                                    .text_color(rgb(0xe5e7eb))
+                                    .child(normalized)
+                            })
+                            .collect();
+
+                        let content = if paragraphs.is_empty() {
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x9ca3af))
+                                .child("This chapter has no visible text.")
+                        } else {
+                            div().flex().flex_col().gap_3().children(paragraphs)
+                        };
                         div()
                             .flex()
                             .flex_col()
@@ -160,13 +219,7 @@ impl Render for ReaderView {
                                     .font_weight(FontWeight::BOLD)
                                     .child(chapter_title),
                             )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .line_height(relative(1.6))
-                                    .text_color(rgb(0xe5e7eb))
-                                    .child(chapter.content.clone()),
-                            )
+                            .child(content)
                     }
                     None => div()
                         .flex()
@@ -209,6 +262,7 @@ impl Render for ReaderView {
             .gap_4()
             .bg(rgb(0x111827))
             .text_color(rgb(0xf9fafb))
+            .key_context("ReaderView")
             .child(header)
             .child(body)
     }
@@ -217,10 +271,8 @@ impl Render for ReaderView {
 impl UiRuntime for GpuiRuntime {
     fn run(self, initial_state: ReaderState) -> Result<()> {
         Application::new().run(move |app: &mut App| {
-            let window_state = initial_state.clone();
             let window_bounds = Bounds::centered(None, size(px(720.0), px(540.0)), app);
-
-            if let Err(err) = app.open_window(
+            let reader_handle = match app.open_window(
                 WindowOptions {
                     titlebar: Some(TitlebarOptions {
                         title: Some("BKAI EPUB Reader".into()),
@@ -229,15 +281,47 @@ impl UiRuntime for GpuiRuntime {
                     window_bounds: Some(WindowBounds::Windowed(window_bounds)),
                     ..Default::default()
                 },
-                move |_, cx| {
-                    let view_state = window_state.clone();
-                    cx.new(|_| ReaderView::new(view_state))
+                {
+                    let state_for_window = initial_state.clone();
+                    move |_, cx| {
+                        let view_state = state_for_window.clone();
+                        cx.new(|_| ReaderView::new(view_state))
+                    }
                 },
             ) {
-                eprintln!("Failed to open gpui window: {err:?}");
-            } else {
-                app.activate(true);
+                Ok(handle) => Rc::new(handle),
+                Err(err) => {
+                    eprintln!("Failed to open gpui window: {err:?}");
+                    return;
+                }
+            };
+
+            app.bind_keys([
+                KeyBinding::new("left", PrevChapterAction, Some("ReaderView")),
+                KeyBinding::new("right", NextChapterAction, Some("ReaderView")),
+            ]);
+
+            {
+                let handle = Rc::clone(&reader_handle);
+                app.on_action(move |action: &PrevChapterAction, app| {
+                    let action = action.clone();
+                    let _ = handle.update(app, |view, window, cx| {
+                        view.handle_prev_action(&action, window, cx);
+                    });
+                });
             }
+
+            {
+                let handle = Rc::clone(&reader_handle);
+                app.on_action(move |action: &NextChapterAction, app| {
+                    let action = action.clone();
+                    let _ = handle.update(app, |view, window, cx| {
+                        view.handle_next_action(&action, window, cx);
+                    });
+                });
+            }
+
+            app.activate(true);
         });
 
         Ok(())
