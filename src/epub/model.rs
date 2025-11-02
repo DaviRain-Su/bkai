@@ -27,9 +27,36 @@ pub struct Spine {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TocEntry {
+    pub label: String,
+    pub href: String,
+    pub children: Vec<TocEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TextSpan {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ChapterBlock {
+    Heading { level: u8, spans: Vec<TextSpan> },
+    Paragraph { spans: Vec<TextSpan> },
+}
+
+impl Default for ChapterBlock {
+    fn default() -> Self {
+        ChapterBlock::Paragraph { spans: Vec::new() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BookContent {
     pub manifest: HashMap<String, ManifestItem>,
     pub spine: Spine,
+    pub toc: Vec<TocEntry>,
     pub chapters: Vec<Chapter>,
 }
 
@@ -37,7 +64,9 @@ pub struct BookContent {
 pub struct Chapter {
     pub id: String,
     pub title: Option<String>,
-    pub content: String,
+    pub href: String,
+    pub blocks: Vec<ChapterBlock>,
+    pub plain_text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

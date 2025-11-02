@@ -33,6 +33,15 @@ impl ReaderState {
             .unwrap_or(0)
     }
 
+    pub fn current_chapter_href(&self) -> Option<&str> {
+        let index = self.current_chapter?;
+        let book = self.active_book.as_ref()?;
+        book.content
+            .chapters
+            .get(index)
+            .map(|chapter| chapter.href.as_str())
+    }
+
     pub fn next_chapter(&mut self) -> bool {
         let total = self.chapter_count();
         let Some(current) = self.current_chapter else {
@@ -54,6 +63,25 @@ impl ReaderState {
 
         if current > 0 {
             self.current_chapter = Some(current - 1);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn jump_to_chapter_href(&mut self, href: &str) -> bool {
+        let Some(book) = self.active_book.as_ref() else {
+            return false;
+        };
+
+        if let Some((index, _)) = book
+            .content
+            .chapters
+            .iter()
+            .enumerate()
+            .find(|(_, chapter)| chapter.href == href)
+        {
+            self.current_chapter = Some(index);
             true
         } else {
             false

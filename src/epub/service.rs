@@ -1,4 +1,7 @@
-use super::{Book, BookContent, BookId, BookMetadata, Chapter, ManifestItem, Spine};
+use super::{
+    Book, BookContent, BookId, BookMetadata, Chapter, ChapterBlock, ManifestItem, Spine, TextSpan,
+    TocEntry,
+};
 use anyhow::Result;
 use epub::doc::{DocError, EpubDoc, NavPoint, SpineItem};
 use html2text::from_read;
@@ -93,10 +96,12 @@ impl EpubService {
 
         let toc_labels = Self::build_toc_label_map(&doc.toc);
         let chapters = Self::collect_chapters(doc, spine_items, &toc_labels);
+        let toc = Self::build_toc_entries(&doc.toc);
 
         BookContent {
             manifest,
             spine,
+            toc,
             chapters,
         }
     }
@@ -161,13 +166,27 @@ impl EpubService {
                 None => continue,
             };
 
-            let plain_text = Self::html_to_plain_text(&html);
-            let title = Self::derive_chapter_title(toc_labels, &resource.path, &plain_text, &idref);
+            let blocks = Self::html_to_blocks(&html);
+            let plain_text = if blocks.is_empty() {
+                Self::html_to_plain_text(&html)
+            } else {
+                Self::blocks_to_plain_text(&blocks)
+            };
+            let title = Self::derive_chapter_title(
+                toc_labels,
+                &resource.path,
+                &blocks,
+                &plain_text,
+                &idref,
+            );
+            let href = resource.path.to_string_lossy().to_string();
 
             chapters.push(Chapter {
                 id: idref.clone(),
                 title,
-                content: plain_text,
+                href,
+                blocks,
+                plain_text,
             });
         }
 
@@ -203,6 +222,7 @@ impl EpubService {
     fn derive_chapter_title(
         toc_labels: &HashMap<PathBuf, String>,
         resource_path: &Path,
+        blocks: &[ChapterBlock],
         plain_text: &str,
         fallback_id: &str,
     ) -> Option<String> {
@@ -212,6 +232,17 @@ impl EpubService {
 
         if let Some(label) = Self::match_toc_label(toc_labels, resource_path) {
             return Some(label);
+        }
+
+        for block in blocks {
+            match block {
+                ChapterBlock::Heading { spans, .. } | ChapterBlock::Paragraph { spans } => {
+                    let text = Self::spans_to_text(spans);
+                    if !text.trim().is_empty() {
+                        return Some(text.trim().to_string());
+                    }
+                }
+            }
         }
 
         if let Some(line) = plain_text.lines().find(|line| !line.trim().is_empty()) {
@@ -235,6 +266,154 @@ impl EpubService {
             }
         }
         None
+    }
+
+    fn build_toc_entries(nav: &[NavPoint]) -> Vec<TocEntry> {
+        nav.iter()
+            .map(|point| TocEntry {
+                label: point.label.clone(),
+                href: Self::normalize_nav_path(&point.content)
+                    .to_string_lossy()
+                    .to_string(),
+                children: Self::build_toc_entries(&point.children),
+            })
+            .collect()
+    }
+
+    fn html_to_blocks(html: &str) -> Vec<ChapterBlock> {
+        let mut blocks = Vec::new();
+        let mut index = 0usize;
+        while let Some(open_rel) = html[index..].find('<') {
+            let open_idx = index + open_rel;
+            let remaining = &html[open_idx + 1..];
+            let close_tag_end = match remaining.find('>') {
+                Some(end) => end,
+                None => break,
+            };
+            let tag_body = remaining[..close_tag_end].trim();
+            if tag_body.is_empty()
+                || tag_body.starts_with('!')
+                || tag_body.starts_with('?')
+                || tag_body.starts_with('/')
+            {
+                index = open_idx + close_tag_end + 1;
+                continue;
+            }
+
+            let mut first_token = tag_body.split_whitespace().next().unwrap_or("").trim();
+            let self_closing = first_token.ends_with('/');
+            if self_closing {
+                first_token = first_token.trim_end_matches('/');
+            }
+            let tag_name_owned = first_token.to_ascii_lowercase();
+            let tag_name = tag_name_owned.as_str();
+            let tag_end_index = open_idx + close_tag_end + 1;
+
+            if self_closing {
+                if tag_name == "br" {
+                    blocks.push(ChapterBlock::Paragraph {
+                        spans: vec![TextSpan {
+                            text: String::new(),
+                            bold: false,
+                            italic: false,
+                        }],
+                    });
+                }
+                index = tag_end_index;
+                continue;
+            }
+
+            let closing_tag = format!("</{}>", tag_name);
+            if let Some(close_rel) = html[tag_end_index..].find(&closing_tag) {
+                let content_start = tag_end_index;
+                let content_end = tag_end_index + close_rel;
+                let inner = &html[content_start..content_end];
+                let text = Self::html_fragment_to_text(inner);
+                if !text.trim().is_empty() {
+                    match tag_name {
+                        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                            let level = tag_name.trim_start_matches('h').parse::<u8>().unwrap_or(1);
+                            blocks.push(ChapterBlock::Heading {
+                                level,
+                                spans: vec![TextSpan {
+                                    text: text.trim().to_string(),
+                                    bold: false,
+                                    italic: false,
+                                }],
+                            });
+                        }
+                        "p" | "blockquote" => {
+                            blocks.push(ChapterBlock::Paragraph {
+                                spans: vec![TextSpan {
+                                    text: text.trim().to_string(),
+                                    bold: false,
+                                    italic: false,
+                                }],
+                            });
+                        }
+                        "li" => {
+                            blocks.push(ChapterBlock::Paragraph {
+                                spans: vec![TextSpan {
+                                    text: format!("- {}", text.trim()),
+                                    bold: false,
+                                    italic: false,
+                                }],
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                index = content_end + closing_tag.len();
+            } else {
+                index = tag_end_index;
+            }
+        }
+
+        if blocks.is_empty() {
+            let fallback = Self::html_to_plain_text(html);
+            if !fallback.trim().is_empty() {
+                blocks.push(ChapterBlock::Paragraph {
+                    spans: vec![TextSpan {
+                        text: fallback.trim().to_string(),
+                        bold: false,
+                        italic: false,
+                    }],
+                });
+            }
+        }
+
+        blocks
+    }
+
+    fn html_fragment_to_text(fragment: &str) -> String {
+        let rendered = html2text::from_read(fragment.as_bytes(), usize::MAX);
+        Self::normalize_whitespace(&rendered)
+    }
+
+    fn normalize_whitespace(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn spans_to_text(spans: &[TextSpan]) -> String {
+        spans
+            .iter()
+            .map(|span| span.text.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn blocks_to_plain_text(blocks: &[ChapterBlock]) -> String {
+        blocks
+            .iter()
+            .map(|block| match block {
+                ChapterBlock::Heading { spans, .. } | ChapterBlock::Paragraph { spans } => {
+                    Self::spans_to_text(spans)
+                }
+            })
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     fn html_to_plain_text(html: &str) -> String {
