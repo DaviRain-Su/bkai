@@ -155,13 +155,28 @@ export function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const storeRef = useRef<InMemoryStateStore>();
+  const storeRef = useRef<InMemoryStateStore | null>(null);
   const paginationCacheRef = useRef<Map<string, Map<number, PaginationSession>>>(new Map());
   const loadedProgressRef = useRef<Set<string>>(new Set());
+  const [storeReady, setStoreReady] = useState(false);
 
-  if (!storeRef.current) {
-    storeRef.current = createBrowserStateStore();
-  }
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const storeInstance = await createBrowserStateStore();
+      if (cancelled) return;
+      storeRef.current = storeInstance;
+      await storeInstance.hydrate();
+      if (!cancelled) {
+        setStoreReady(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const store = storeRef.current;
 
   const getPaginationSession = useCallback(
@@ -423,6 +438,7 @@ export function App() {
   }, [library, currentBookId]);
 
   useEffect(() => {
+    if (!store) return;
     library.forEach(bookEntry => {
       if (loadedProgressRef.current.has(bookEntry.id)) return;
       loadedProgressRef.current.add(bookEntry.id);
@@ -445,7 +461,7 @@ export function App() {
   }, [library, store]);
 
   useEffect(() => {
-    if (!currentBook) return;
+    if (!store || !currentBook) return;
     const position = readingPositions[currentBook.id];
     if (!position) return;
     const spineChapter = currentBook.chapters[position.chapter];
@@ -468,6 +484,16 @@ export function App() {
       }));
     }
   }, [paginationSession, currentBook, currentPageIndex, updatePosition]);
+
+  if (!storeReady || !store) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-200">
+        <div className="rounded-lg border border-slate-800 bg-slate-900 px-6 py-4 text-sm text-slate-300">
+          正在加载阅读进度...
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
