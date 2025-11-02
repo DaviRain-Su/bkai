@@ -2,8 +2,7 @@
 
 ## 背景
 我们要构建一个首版只支持 `.epub` 的电子图书阅读器，并计划未来扩展到更多电
-子书格式。UI 层使用 [`gpui`](https://github.com/zed-industries/zed/tree/main/gpui)
-完成界面与交互。为保持可扩展与良好协作，这里定义核心“角色/Agent”，明确职责、
+子书格式。为保持可扩展与良好协作，这里定义核心“角色/Agent”，明确职责、
 交付物、接口以及协同流程。
 
 ## 目标
@@ -15,35 +14,31 @@
 ## Agent 角色定义
 
 ### 1. 架构 / Platform Agent
-- **职责**：定义整体架构、模块边界、核心数据结构；把关性能与扩展性；负责基础
-  设施（日志、配置、依赖管理）。
+- **职责**：定义整体架构、模块边界、核心数据结构；把关性能与扩展性；负责基础设施（日志、配置、依赖管理、事件系统）。
 - **近期交付**：
   - 模块划分文档（Core Parser、Renderer、UI Shell、Storage 等）。
-  - 基础 crate 依赖与目录结构的落地。
-  - 构建脚本、CI 骨架（如 `cargo fmt`, `cargo clippy`, 单元测试模板）。
-- **接口**：为其他 Agent 提供稳定 API、事件总线或数据模型约定。
+  - Bun 工作区依赖与目录结构落地（`packages/*`、`apps/reader`）。
+  - 构建脚本、CI 骨架（`bun lint`、`bun test`、`bun run build`）。
+- **接口**：为其他 Agent 提供稳定 API、事件总线或数据模型约定（TypeScript interface）。
 
 ### 2. EPUB 解析 Agent
-- **职责**：调研与实现 `.epub` 的解析流程，包括容器结构、OPF/NCX 导航、资源解
-  压、CSS 支持策略。
+- **职责**：调研与实现 `.epub` 的解析流程，包括容器结构、OPF/NCX 导航、资源解压、CSS 支持策略；在前端环境采用纯 TypeScript ZIP/XML 方案。
 - **近期交付**：
-  - `.epub` 解析模块原型（API：`open_epub(path) -> BookModel`）。
+  - `.epub` 解析模块原型（API：`openEpub(source) -> Promise<BookModel>`）。
   - 解析容错策略与错误上报规范。
-  - 单元测试覆盖核心边界场景（缺失资源、加密、无目录等）。
+  - 单元测试覆盖核心边界场景（缺失资源、加密、无目录等），使用 `bun test`。
 - **接口**：暴露结构化的 `BookModel`，供渲染和状态管理模块调用。
 
-### 3. UI Shell Agent（gpui）
-- **职责**：使用 `gpui` 落地阅读器主界面、导航与交互骨架；负责状态同步与渲染输
-  出的集成。
+### 3. UI Shell Agent（React Web）
+- **职责**：基于 React + Tailwind 实现阅读器主界面、导航与交互骨架；负责状态同步与渲染输出的集成。
 - **近期交付**：
-  - UI 结构原型（窗口、侧边栏目录、阅读区、状态栏）。
+  - UI 结构原型（文件上传、侧边栏目录、阅读区、状态栏）。
   - 与渲染 Agent 的接口协议（分页数据、样式信息、事件回调）。
   - 键鼠快捷键与基础操作流（打开文件、跳转章节、调整字号等）。
 - **接口**：消费 `Renderer Agent` 输出的分页视图数据，向上游发出用户事件。
 
 ### 4. 渲染与分页 Agent
-- **职责**：负责将解析后的 HTML/CSS 内容转换为可分页的布局数据，并提供渲染到
-  `gpui` 所需的结构。
+- **职责**：负责将解析后的 HTML/CSS 内容转换为可分页的布局数据，落地在 Web 环境并支持多主题/字体配置。
 - **近期交付**：
   - 分页算法原型（考虑字体、字号、容器尺寸、行距）。
   - 渲染数据模型（如 `PageView { fragments, viewport }`）。
@@ -54,8 +49,8 @@
 - **职责**：管理阅读进度、书签、用户设置；负责轻量级持久化方案。
 - **近期交付**：
   - 状态管理抽象（事件流/命令总线）。
-  - 本地存储方案（例如基于 `serde` + 文件存储或 `sled`）。
-  - 与 UI Agent 的同步 API（如 `save_progress(book_id, location)`）。
+  - 本地存储方案（Bun.fs JSON、IndexedDB、KV 适配器）。
+  - 与 UI Agent 的同步 API（如 `saveProgress(bookId, location)`）。
 - **接口**：与 UI、渲染模块共享读写接口，确保数据一致。
 
 ### 6. QA / Tooling Agent
@@ -72,13 +67,7 @@
 - **知识复用**：共用 `BookModel` 等核心结构，禁止各自重复解析。
 
 ## 扩展展望
-- **多格式**：为未来的 `.mobi`/`.pdf`/`cbz` 预留模块接口，解析 Agent 可通过特征
-  `FormatParser` 抽象实现。
-- **插件化渲染**：渲染 Agent 可以抽象成 trait，便于引入自定义主题或夜间模式。
-- **云服务**：状态 Agent 抽象出 `StorageBackend`，支持本地/云端切换。
+- **多格式**：为未来的 `.mobi`/`.pdf`/`cbz` 预留模块接口，解析 Agent 通过 TypeScript `FormatParser` interface 实现。
+- **插件化渲染**：渲染 Agent 抽象成可插拔渲染器，便于引入自定义主题或夜间模式。
+- **云服务**：状态 Agent 抽象出 `StorageBackend`，支持本地/云端切换（REST、GraphQL、KV）。
 - **辅助功能**：后续可新增搜索、高亮、批注 Agent，与状态层协作。
-
-## 下一步建议
-1. 架构 Agent 输出模块拓扑图与 crate 划分初稿。
-2. EPUB 解析 Agent 调研现有 Rust 生态库（`epub`、`zip`、`roxmltree` 等）。
-3. UI Shell Agent 搭建 `gpui` 空壳应用，验证窗口管理与基本事件循环。

@@ -1,0 +1,49 @@
+@import "../styles/globals.css";
+
+@layer base {
+  :root {
+    @apply font-sans;
+  }
+
+  body {
+    @apply min-h-screen bg-slate-950 text-slate-100 antialiased;
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion) {
+  *,
+  ::before,
+  ::after {
+    animation: none !important;
+  }
+}
+
+@layer components {
+  .reader-content p {
+    @apply mb-4 leading-7 text-slate-100;
+  }
+
+  .reader-content h1,
+  .reader-content h2,
+  .reader-content h3,
+  .reader-content h4 {
+    @apply mb-4 mt-6 font-semibold text-slate-100;
+  }
+
+  .reader-content img {
+    @apply my-4 max-w-full rounded;
+  }
+
+  .reader-content a {
+    @apply text-sky-300 underline hover:text-sky-200;
+  }
+}
