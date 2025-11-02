@@ -1,0 +1,13 @@
+[package]
+name = "bkai"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+epub = "2.1"
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "macos-blade"] }
+html2text = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+uuid = { version = "1.7", features = ["v4"] }
