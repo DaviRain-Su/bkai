@@ -30,6 +30,15 @@ bun dev
 - 目录、上一页/下一页、书籍切换等基础阅读交互。
 - 阅读进度与书签默认持久化到浏览器（IndexedDB 优先，回退到 localStorage）。
 - Shadow DOM 渲染隔离 EPUB 样式，保证深色主题下的阅读体验。
+- GitHub 登录打通（OAuth），为后续云端同步阅读状态提供凭证接口。
+
+## 环境变量
+
+后端在运行时需要以下配置（可在 `.env` 或运行环境中设置）：
+
+- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`：GitHub OAuth 应用凭据。
+- `AUTH_SECRET`：用于签发/校验阅读器 JWT 的 HMAC 秘钥。
+- `READING_STATE_FILE`（可选）：云端状态存储文件路径，默认 `./data/reading_state.json`。
 
 更详细的角色划分和架构说明见：
 

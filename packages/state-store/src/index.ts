@@ -1,6 +1,8 @@
 import { EventBus } from "@core-platform";
 import { createIndexedDbBackend, IndexedDbBackend } from "./storage/indexeddb";
 import { createLocalStorageBackend, LocalStorageBackend } from "./storage/localStorage";
+import { createCloudBackend, CloudBackend } from "./storage/cloud";
+import { createCompositeBackend, CompositeBackend } from "./storage/composite";
 import {
   PageLocator,
   ReadingSessionState,
@@ -132,6 +134,7 @@ const DEFAULT_STORAGE_KEY = "bkai.reader.state.v1";
 export interface BrowserStateStoreOptions {
   storageKey?: string;
   preferIndexedDb?: boolean;
+  authToken?: string | null;
 }
 
 export async function createBrowserStateStore(options: BrowserStateStoreOptions = {}) {
@@ -151,8 +154,21 @@ export async function createBrowserStateStore(options: BrowserStateStoreOptions 
     }
   }
 
-  if (!backend) {
-    backend = createLocalStorageBackend({ storageKey });
+  let localBackend = backend;
+  if (!localBackend) {
+    localBackend = createLocalStorageBackend({ storageKey });
+  }
+
+  if (options.authToken) {
+    try {
+      const cloudBackend = createCloudBackend({ token: options.authToken });
+      backend = createCompositeBackend({ primary: cloudBackend, fallback: localBackend });
+    } catch (error) {
+      console.warn("[state-store] Failed to initialize cloud backend", error);
+      backend = localBackend;
+    }
+  } else {
+    backend = localBackend;
   }
 
   return new InMemoryStateStore({ backend });
@@ -163,6 +179,10 @@ export {
   LocalStorageBackend,
   createIndexedDbBackend,
   createLocalStorageBackend,
+  CloudBackend,
+  createCloudBackend,
+  CompositeBackend,
+  createCompositeBackend,
 };
 
 export type { StateStoreBackend, PageLocator, ReadingSessionState, StateSnapshot };

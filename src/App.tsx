@@ -47,6 +47,20 @@ interface ShadowPageProps {
   inlineStyle?: string;
 }
 
+interface UserProfile {
+  login: string;
+  name?: string;
+  avatarUrl?: string;
+}
+
+type AuthState =
+  | { status: "checking" }
+  | { status: "authenticated"; token: string; profile: UserProfile }
+  | { status: "anonymous" }
+  | { status: "error"; message: string };
+
+const AUTH_TOKEN_KEY = "bkai.auth.token";
+
 function ShadowPage({ html, styles, className, inlineStyle }: ShadowPageProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
 
@@ -147,12 +161,13 @@ function flattenToc(toc: TocItem[]): TocItem[] {
 }
 
 export function App() {
+  const [authState, setAuthState] = useState<AuthState>({ status: "checking" });
   const [library, setLibrary] = useState<LoadedBook[]>([]);
   const [currentBookId, setCurrentBookId] = useState<string | null>(null);
   const [readingPositions, setReadingPositions] = useState<
     Record<string, { chapter: number; page: number }>
   >({});
-  const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const storeRef = useRef<InMemoryStateStore | null>(null);
@@ -162,22 +177,101 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
+    setStoreReady(false);
+    storeRef.current = null;
+    setReadingPositions({});
+    loadedProgressRef.current = new Set();
+
     (async () => {
-      const storeInstance = await createBrowserStateStore();
+      const storeInstance = await createBrowserStateStore({ authToken });
       if (cancelled) return;
       storeRef.current = storeInstance;
       await storeInstance.hydrate();
-      if (!cancelled) {
-        setStoreReady(true);
+      if (cancelled) return;
+
+      const snapshot = storeInstance.snapshot();
+      const initialPositions: Record<string, { chapter: number; page: number }> = {};
+      for (const [bookId, data] of Object.entries(snapshot)) {
+        initialPositions[bookId] = {
+          chapter: 0,
+          page: Math.max(0, data.lastLocation?.offset ?? 0),
+        };
       }
+      setReadingPositions(initialPositions);
+      setStoreReady(true);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authToken]);
 
+  const authToken = authState.status === "authenticated" ? authState.token : undefined;
   const store = storeRef.current;
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      setAuthState({ status: "anonymous" });
+      return;
+    }
+
+    let cancelled = false;
+
+    const finalize = (state: AuthState) => {
+      if (!cancelled) {
+        setAuthState(state);
+      }
+    };
+
+    const url = new URL(window.location.href);
+    const tokenFromUrl = url.searchParams.get("auth_token");
+    const authError = url.searchParams.get("auth_error");
+
+    if (tokenFromUrl) {
+      window.localStorage.setItem(AUTH_TOKEN_KEY, tokenFromUrl);
+      url.searchParams.delete("auth_token");
+      window.history.replaceState({}, "", url.toString());
+    }
+
+    if (authError) {
+      url.searchParams.delete("auth_error");
+      window.history.replaceState({}, "", url.toString());
+      finalize({ status: "error", message: decodeURIComponent(authError) });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const storedToken = window.localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!storedToken) {
+      finalize({ status: "anonymous" });
+    } else {
+      (async () => {
+        try {
+          const response = await fetch("/api/auth/me", {
+            headers: {
+              Authorization: `Bearer ${storedToken}`,
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error(`status ${response.status}`);
+          }
+
+          const profile = (await response.json()) as UserProfile;
+          finalize({ status: "authenticated", token: storedToken, profile });
+        } catch (error) {
+          console.warn("Failed to verify auth token", error);
+          window.localStorage.removeItem(AUTH_TOKEN_KEY);
+          finalize({ status: "anonymous" });
+        }
+      })();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const getPaginationSession = useCallback(
     (bookId: string, chapter: ChapterPayload, html: string) => {
@@ -290,11 +384,24 @@ export function App() {
   );
   const totalPages = paginationSession?.totalPages ?? 0;
 
+  const handleLoginClick = useCallback(() => {
+    if (typeof window !== "undefined") {
+      window.location.href = "/auth/github/login";
+    }
+  }, []);
+
+  const handleLogoutClick = useCallback(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+    setAuthState({ status: "anonymous" });
+  }, []);
+
   const handleFileChange: React.ChangeEventHandler<HTMLInputElement> = async event => {
     const fileList = event.target.files;
     if (!fileList || fileList.length === 0) return;
 
-    setLoading(true);
+    setUploading(true);
     setError(null);
 
     const files = Array.from(fileList);
@@ -360,7 +467,7 @@ export function App() {
       setError(messages.join("；"));
     }
 
-    setLoading(false);
+    setUploading(false);
     event.target.value = "";
   };
 
@@ -503,17 +610,71 @@ export function App() {
             <h1 className="text-2xl font-semibold">BKAI EPUB 阅读器原型</h1>
             <p className="text-sm text-slate-400">上传本地 .epub 文件，即时解析并阅读。</p>
           </div>
-          <label className="inline-flex cursor-pointer items-center gap-3 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700">
-            <input
-              type="file"
-              accept=".epub"
-              onChange={handleFileChange}
-              disabled={loading}
-              multiple
-              className="hidden"
-            />
-            {loading ? "解析中..." : "选择 EPUB 文件"}
-          </label>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+            {authState.status === "authenticated" ? (
+              <div className="flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200">
+                {authState.profile.avatarUrl ? (
+                  <img
+                    src={authState.profile.avatarUrl}
+                    alt={authState.profile.login}
+                    className="h-8 w-8 rounded-full border border-slate-600"
+                  />
+                ) : (
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-600 bg-slate-700 text-xs uppercase">
+                    {authState.profile.login.slice(0, 2)}
+                  </div>
+                )}
+                <div className="leading-tight">
+                  <div className="font-medium">
+                    {authState.profile.name ?? authState.profile.login}
+                  </div>
+                  <div className="text-xs text-slate-400">@{authState.profile.login}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleLogoutClick}
+                  className="rounded border border-slate-600 px-2 py-1 text-xs text-slate-200 hover:bg-slate-700"
+                >
+                  退出
+                </button>
+              </div>
+            ) : authState.status === "checking" ? (
+              <div className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-slate-300">
+                正在检测登录状态...
+              </div>
+            ) : authState.status === "error" ? (
+              <div className="flex items-center gap-3 rounded-lg border border-red-500 bg-red-500/10 px-4 py-2 text-sm text-red-200">
+                <span>{authState.message}</span>
+                <button
+                  type="button"
+                  onClick={() => setAuthState({ status: "anonymous" })}
+                  className="rounded border border-red-300/40 px-2 py-1 text-xs hover:bg-red-500/20"
+                >
+                  忽略
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={handleLoginClick}
+                className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700"
+              >
+                使用 GitHub 登录
+              </button>
+            )}
+
+            <label className="inline-flex cursor-pointer items-center gap-3 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700">
+              <input
+                type="file"
+                accept=".epub"
+                onChange={handleFileChange}
+                disabled={uploading}
+                multiple
+                className="hidden"
+              />
+              {uploading ? "解析中..." : "选择 EPUB 文件"}
+            </label>
+          </div>
         </div>
       </header>
 
